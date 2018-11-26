@@ -1,9 +1,10 @@
 if (typeof Buffer == "undefined") Buffer = require("buffer/").Buffer;
 if (typeof XMLHttpRequest == "undefined") XMLHttpRequest = require('xhr2');
-const BN = require("bignumber.js")
+const BN = require("bignumber.js");
 const 
 //CLI below
 defaultProvider = "https://rpc.tezrpc.me/",
+counters = {},
 library = {
   bs58check: require('bs58check'),
   sodium: require('libsodium-wrappers'),
@@ -24,6 +25,8 @@ prefix = {
   
   sppk: new Uint8Array([3, 254, 226, 86]),
   p2pk: new Uint8Array([3, 178, 139, 127]),
+  
+  edesk: new Uint8Array([7, 90, 60, 179, 41]),
   
   edsk: new Uint8Array([43, 246, 78, 7]),
   edsig: new Uint8Array([9, 245, 205, 134, 18]),
@@ -249,6 +252,38 @@ utility = {
 },
 //TODO: Add p256 and secp256k1 cryptographay
 crypto = {
+  extractEncryptedKeys : function(esk, password){
+    if (typeof esk == 'undefined') return false;
+    if (typeof password == 'undefined') return false;
+    if (typeof window.crypto.subtle == 'undefined') return false;
+    
+    const esb = utility.b58cdecode(esk, prefix.edesk);
+    const salt = esb.slice(0, 8);
+    const esm = esb.slice(8);
+    
+    return window.crypto.subtle.importKey('raw', new TextEncoder('utf-8').encode(password), {name: 'PBKDF2'}, false, ['deriveBits']).then(function(key){
+        console.log(key);
+      return window.crypto.subtle.deriveBits(
+        {
+          name: 'PBKDF2',
+          salt: salt,
+          iterations: 32768,
+          hash: {name: 'SHA-512'}
+        },
+        key,
+        256 
+      );
+    }).then(function(key){
+        console.log(key);
+        console.log(library.sodium.crypto_secretbox_open_easy(esm, new Uint8Array(24), new Uint8Array(key)));
+      const kp = library.sodium.crypto_sign_seed_keypair(library.sodium.crypto_secretbox_open_easy(esm, new Uint8Array(24), new Uint8Array(key)));
+      return {
+        sk: utility.b58cencode(kp.privateKey, prefix.edsk),
+        pk: utility.b58cencode(kp.publicKey, prefix.edpk),
+        pkh: utility.b58cencode(library.sodium.crypto_generichash(20, kp.publicKey), prefix.tz1),
+      };
+    });
+  },
   extractKeys : function(sk){
     const pref = sk.substr(0,4);
     switch(pref){
@@ -337,10 +372,12 @@ node = {
   activeProvider: defaultProvider,
   debugMode: false,
   async: true,
+	isZeronet : false,
   setDebugMode: function (t) {
     node.debugMode = t;
   },
-  setProvider: function (u) {
+  setProvider: function (u, z) {
+		if (typeof z != 'undefined') node.isZeronet = z;
     node.activeProvider = u;
   },
   resetProvider: function () {
@@ -403,17 +440,8 @@ node = {
   }
 },
 rpc = {
-  account: function (keys, amount, spendable, delegatable, delegate, fee) {
-    const operation = {
-      "kind": "origination",
-      "fee": fee.toString(),
-      "managerPubkey": keys.pkh,
-      "balance": utility.mutez(amount).toString(),
-      "spendable": (typeof spendable !== "undefined" ? spendable : true),
-      "delegatable": (typeof delegatable !== "undefined" ? delegatable : true),
-      "delegate": (typeof delegate !== "undefined" ? delegate : keys.pkh),
-    };
-    return rpc.sendOperation(keys.pkh, operation, keys);
+	call: function (e, d) {
+    return node.query(e, d);
   },
   getBalance: function (tz1) {
     return node.query("/chains/main/blocks/head/context/contracts/" + tz1 + "/balance").then(function (r) {
@@ -432,12 +460,11 @@ rpc = {
   getHeadHash: function () {
     return node.query("/chains/main/blocks/head/hash");
   },
-  call: function (e, d) {
-    return node.query(e, d);
-  },
-  sendOperation: function (from, operation, keys) {
+	
+	sendOperation: function (from, operation, keys, skipPrevalidation) {
     if (typeof keys == 'undefined') keys = false;
-    var hash, counter, pred_block, sopbytes, returnedContracts, opOb, errors = [], opResponse = [];
+    if (typeof skipPrevalidation == 'undefined') skipPrevalidation = false;
+    var hash, counter, pred_block, sopbytes, returnedContracts, opOb;
     var promises = [], requiresReveal=false;
 
     promises.push(node.query('/chains/main/blocks/head/header'));
@@ -462,13 +489,18 @@ rpc = {
       if (requiresReveal && keys && typeof f[2].key == 'undefined'){
         ops.unshift({
           kind : "reveal",
-          fee : 0,
+          fee : (node.isZeronet ? "100000" : "1150"),
           public_key : keys.pk,
           source : from,
+					gas_limit: 10000,
+					storage_limit: 0
         });
       }
       counter = parseInt(f[1]) + 1;
-      
+      if (typeof counters[from] == 'undefined') counters[from] = counter;
+			if (counter > counters[from]) counters[from] = counter;
+			//fix reset bug temp
+			counters[from] = counter;
       for(let i = 0; i < ops.length; i++){
         if (['proposals','ballot','transaction','origination','delegation'].indexOf(ops[i].kind) >= 0){
           if (typeof ops[i].source == 'undefined') ops[i].source = from;
@@ -476,7 +508,7 @@ rpc = {
         if (['reveal', 'transaction','origination','delegation'].indexOf(ops[i].kind) >= 0) {
           if (typeof ops[i].gas_limit == 'undefined') ops[i].gas_limit = "0";
           if (typeof ops[i].storage_limit == 'undefined') ops[i].storage_limit = "0";
-          ops[i].counter = (counter++).toString();
+          ops[i].counter = (counters[from]++).toString();
           
            ops[i].fee = ops[i].fee.toString();
            ops[i].gas_limit = ops[i].gas_limit.toString();
@@ -492,18 +524,32 @@ rpc = {
     })
     .then(function (f) {
       var opbytes = f;
-      opOb.protocol = head.protocol;
-      if (!keys) {
-        sopbytes = opbytes + "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
-        opOb.signature = "edsigtXomBKi5CTRf5cjATJWSyaRvhfYNHqSUGrn4SdbYRcGwQrUGjzEfQDTuqHhuA8b2d8NarZjz8TRf65WkpQmo423BtomS8Q";
+      if (keys.sk === false) {
+				opOb.protocol = head.protocol;
+        return {
+          opOb : opOb,
+          opbytes : opbytes
+        };
       } else {
-        var signed = crypto.sign(opbytes, keys.sk, watermark.generic);
-        sopbytes = signed.sbytes;
-        opOb.signature = signed.edsig;
+        if (!keys) {
+          sopbytes = opbytes + "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+          opOb.signature = "edsigtXomBKi5CTRf5cjATJWSyaRvhfYNHqSUGrn4SdbYRcGwQrUGjzEfQDTuqHhuA8b2d8NarZjz8TRf65WkpQmo423BtomS8Q";
+        } else {
+          var signed = crypto.sign(opbytes, keys.sk, watermark.generic);
+          sopbytes = signed.sbytes;
+          opOb.signature = signed.edsig;
+        }
+				//return node.query('/chains/main/blocks/head/helpers/scripts/run_operation', opOb)
+				
+				opOb.protocol = head.protocol;
+				if (skipPrevalidation) return rpc.silentInject(sopbytes);
+				else return rpc.inject(opOb, sopbytes);
       }
-      return node.query('/chains/main/blocks/head/helpers/preapply/operations', [opOb]);
     })
-    .then(function (f) {
+  },
+  inject: function(opOb, sopbytes){
+    var opResponse = [], errors = [];
+    return node.query('/chains/main/blocks/head/helpers/preapply/operations', [opOb]).then(function (f) {
       if (!Array.isArray(f)) throw {error: "RPC Fail", errors:[]};
       for(var i = 0; i < f.length; i++){
         for(var j = 0; j < f[i].contents.length; j++){
@@ -514,17 +560,41 @@ rpc = {
       }        
       if (errors.length) throw {error: "Operation Failed", errors:errors};
       return node.query('/injection/operation', sopbytes);
-    })
-    .then(function (f) {
+    }).then(function (f) {
       return {
         hash : f,
         operations : opResponse
       };
     });
   },
-  transfer: function (from, keys, to, amount, fee, parameter, gasLimit, storageLimit) {
-    if (typeof gasLimit == 'undefined') gasLimit = '200';
-    if (typeof storageLimit == 'undefined') storageLimit = '0';
+	silentInject: function(sopbytes){
+    return node.query('/injection/operation', sopbytes).then(function (f) {
+      return {
+        hash : f
+      };
+    });
+  },
+  
+	account: function (keys, amount, spendable, delegatable, delegate, fee, gasLimit, storageLimit) {
+		if (typeof gasLimit == 'undefined') gasLimit = '10000';
+		if (typeof storageLimit == 'undefined') storageLimit = '300';
+    const operation = {
+      "kind": "origination",
+      "balance": utility.mutez(amount).toString(),
+      "fee": fee.toString(),
+      "gas_limit": gasLimit,
+      "storage_limit": storageLimit,
+    };
+		if (node.isZeronet) operation['manager_pubkey'] = keys.pkh;
+		else operation['managerPubkey'] = keys.pkh;
+    if (typeof spendable != "undefined") operation.spendable = spendable;
+    if (typeof delegatable != "undefined") operation.delegatable = delegatable;
+    if (typeof delegate != "undefined" && delegate) operation.delegate = delegate;
+    return rpc.sendOperation(keys.pkh, operation, keys);
+  },
+	transfer: function (from, keys, to, amount, fee, parameter, gasLimit, storageLimit) {
+    if (typeof gasLimit == 'undefined') gasLimit = '10300';
+    if (typeof storageLimit == 'undefined') storageLimit = '277';
     var operation = {
       "kind": "transaction",
       "fee" : fee.toString(),
@@ -539,36 +609,29 @@ rpc = {
     }
     return rpc.sendOperation(from, operation, keys);
   },
-  activate: function (pkh, secret) {
-    var operation = {
-      "kind": "activate_account",
-      "pkh" : pkh,
-      "secret": secret,
-    };
-    return rpc.sendOperation(pkh, operation, false);
-  },
   originate: function (keys, amount, code, init, spendable, delegatable, delegate, fee, gasLimit, storageLimit) {
     if (typeof gasLimit == 'undefined') gasLimit = '10000';
-    if (typeof storageLimit == 'undefined') storageLimit = '10000';
+    if (typeof storageLimit == 'undefined') storageLimit = '300';
     var _code = utility.ml2mic(code), script = {
       code: _code,
       storage: utility.sexp2mic(init)
     }, operation = {
       "kind": "origination",
       "balance": utility.mutez(amount).toString(),
-      "managerPubkey": keys.pkh,
       "storage_limit": storageLimit,
       "gas_limit": gasLimit,
       "fee" : fee.toString(),
       "script": script,
     };
+		if (node.isZeronet) operation['manager_pubkey'] = keys.pkh;
+		else operation['managerPubkey'] = keys.pkh;
     if (typeof spendable != "undefined") operation.spendable = spendable;
     if (typeof delegatable != "undefined") operation.delegatable = delegatable;
     if (typeof delegate != "undefined" && delegate) operation.delegate = delegate;
     return rpc.sendOperation(keys.pkh, operation, keys);
   },
   setDelegate(from, keys, delegate, fee, gasLimit, storageLimit) {
-    if (typeof gasLimit == 'undefined') gasLimit = '0';
+    if (typeof gasLimit == 'undefined') gasLimit = '10000';
     if (typeof storageLimit == 'undefined') storageLimit = '0';
     var operation = {
       "kind": "delegation",
@@ -580,7 +643,7 @@ rpc = {
     return rpc.sendOperation(from, operation, keys);
   },
   registerDelegate(keys, fee, gasLimit, storageLimit) {
-    if (typeof gasLimit == 'undefined') gasLimit = '0';
+    if (typeof gasLimit == 'undefined') gasLimit = '10000';
     if (typeof storageLimit == 'undefined') storageLimit = '0';
     var operation = {
       "kind": "delegation",
@@ -591,7 +654,17 @@ rpc = {
     };
     return rpc.sendOperation(keys.pkh, operation, keys);
   },
-  typecheckCode(code) {
+  
+	activate: function (pkh, secret) {
+    var operation = {
+      "kind": "activate_account",
+      "pkh" : pkh,
+      "secret": secret,
+    };
+    return rpc.sendOperation(pkh, operation, false);
+  },
+  
+	typecheckCode(code) {
     var _code = utility.ml2mic(code);
     return node.query("/chains/main/blocks/head/helpers/scripts/typecheck_code", {program : _code, gas : "10000"});
   },
@@ -675,6 +748,80 @@ contract = {
     return setInterval(ct, timeout * 1000);
   },
 };
+trezor = {
+	source : function(address){
+		var tag = (address[0] == "t" ? 0 : 1);
+		var curve = (parseInt(address[2])-1);
+		var pp = (tag == 1 ? prefix.KT : prefix["tz"+(curve+1)]);
+		var bytes = utility.b58cdecode(address, pp);
+		if (tag == 1) {
+			bytes = utility.mergebuf(bytes, [0])
+		} else {					
+			bytes = utility.mergebuf([curve], bytes)
+		}
+		return {
+			tag : tag,
+			hash : bytes
+		};
+	},
+	operation : function(d){
+		var operations = [];
+		var revealOp = false;
+		var op;
+		for(var i = 0; i < d.opOb.contents.length; i++){
+			op = d.opOb.contents[i];
+			if (op.kind == "reveal"){
+				if (revealOp) throw "Can't have 2 reveals";
+				revealOp = {
+					source : trezor.source(op.source),
+					fee : parseInt(op.fee),
+					counter : parseInt(op.counter),
+					gasLimit : parseInt(op.gas_limit),
+					storageLimit : parseInt(op.storage_limit),
+					publicKey : utility.mergebuf([0], utility.b58cdecode(op.public_key, prefix.edpk)),
+				};
+			} else {
+				if (['origination', 'transaction', 'delegation'].indexOf(op.kind) < 0) return console.log("err2");
+				op2 = {
+					type : op.kind,
+					source : trezor.source(op.source),
+					fee : parseInt(op.fee),
+					counter : parseInt(op.counter),
+					gasLimit : parseInt(op.gas_limit),
+					storageLimit : parseInt(op.storage_limit),
+				};
+				switch(op.kind){
+					case "transaction":
+						op2.amount = parseInt(op.amount);
+						op2.destination = trezor.source(op.destination);
+						if (d.opbytes.length > 172) op2.parameters = utility.hex2buf(d.opbytes.substr(172));
+					break;
+					case "origination":
+						if (node.isZeronet) op2.manager_pubkey = trezor.source(op.manager_pubkey).hash;
+						else op2.managerPubkey = trezor.source(op.managerPubkey).hash;
+						op2.balance = parseInt(op.balance);
+						op2.spendable = op.spendable;
+						op2.delegatable = op.delegatable;
+						if (typeof op.delegate != 'undefined'){
+							op2.delegate = trezor.source(op.delegate).hash;
+						}
+						//Script not supported yet...
+					break;
+					case "delegation":
+						if (typeof op.delegate != 'undefined'){
+							op2.delegate = trezor.source(op.delegate).hash;
+						}
+					break;
+				}
+				operations.push(op2);
+			}
+		}
+		if (operations.length > 1) return console.log("Too many operations");
+		var operation = operations[0];
+		var tx = {};
+		return [operation, revealOp];
+	}
+};
 
 //Legacy
 utility.ml2tzjson = utility.sexp2mic;
@@ -694,6 +841,7 @@ eztz = {
   node: node,
   rpc: rpc,
   contract: contract,
+  trezor: trezor,
 };
 
 module.exports = {
