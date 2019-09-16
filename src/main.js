@@ -3,7 +3,7 @@ if (typeof XMLHttpRequest == "undefined") XMLHttpRequest = require('xhr2');
 const BN = require("bignumber.js");
 const 
 //CLI below
-defaultProvider = "https://rpc.tezrpc.me/",
+defaultProvider = "https://mainnet.tezrpc.me/",
 counters = {},
 library = {
   bs58check: require('bs58check'),
@@ -50,6 +50,15 @@ watermark = {
   generic: new Uint8Array([3]),
 },
 utility = {
+	b582int : function(v){
+		var rv = new BN(0), alpha = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+		for(var i = 0; i < v.length; i++){
+			rv = rv.plus(
+				new BN(alpha.indexOf(v[v.length-1-i])).multipliedBy(
+					new BN(alpha.length).exponentiatedBy(i)));
+		}
+		return rv.toString(16);
+	},
   totez: m => parseInt(m) / 1000000,
   mutez: function (tz) {
     return new BN(new BN(tz).toFixed(6)).multipliedBy(1000000).toString()
@@ -112,7 +121,8 @@ utility = {
           if (val === parseInt(val).toString()) {
             if (!ret.prim) return {"int": val};
             else ret.args.push({"int": val});
-          } else if (val[0] == '0') {
+          } else if (val[0] == '0' && val[1] == 'x') {
+						val = val.substr(2);
             if (!ret.prim) return {"bytes": val};
             else ret.args.push({"bytes": val});
           } else if (ret.prim) {
@@ -319,33 +329,12 @@ crypto = {
       return false;
     }
   },
-  generateKeysNoSeed: function () {
-    const kp = library.sodium.crypto_sign_keypair();
-    return {
-      sk: utility.b58cencode(kp.privateKey, prefix.edsk),
-      pk: utility.b58cencode(kp.publicKey, prefix.edpk),
-      pkh: utility.b58cencode(library.sodium.crypto_generichash(20, kp.publicKey), prefix.tz1),
-    };
-  },
   generateKeys: function (m, p) {
     const s = library.bip39.mnemonicToSeed(m, p).slice(0, 32);
     const kp = library.sodium.crypto_sign_seed_keypair(s);
     return {
       mnemonic: m,
       passphrase: p,
-      sk: utility.b58cencode(kp.privateKey, prefix.edsk),
-      pk: utility.b58cencode(kp.publicKey, prefix.edpk),
-      pkh: utility.b58cencode(library.sodium.crypto_generichash(20, kp.publicKey), prefix.tz1),
-    };
-  },
-  generateKeysFromSeedMulti: function (m, p, n) {
-    n /= (256 ^ 2);
-    const s = library.bip39.mnemonicToSeed(m, library.pbkdf2.pbkdf2Sync(p, n.toString(36).slice(2), 0, 32, 'sha512').toString()).slice(0, 32);
-    const kp = library.sodium.crypto_sign_seed_keypair(s);
-    return {
-      mnemonic: m,
-      passphrase: p,
-      n: n,
       sk: utility.b58cencode(kp.privateKey, prefix.edsk),
       pk: utility.b58cencode(kp.publicKey, prefix.edpk),
       pkh: utility.b58cencode(library.sodium.crypto_generichash(20, kp.publicKey), prefix.tz1),
@@ -398,11 +387,12 @@ node = {
         const http = new XMLHttpRequest();
         http.open(t, node.activeProvider + e, node.async);
         if (node.debugMode)
-          console.log(e, o, http.responseText);
+          console.log("Node call", e, o);
         http.onload = function () {
           if (http.status === 200) {
             if (http.responseText) {
               let r = JSON.parse(http.responseText);
+							if (node.debugMode) console.log("Node response", e, o, r);
               if (typeof r.error !== 'undefined') {
                 reject(r.error);
               } else {
@@ -443,53 +433,115 @@ rpc = {
 	call: function (e, d) {
     return node.query(e, d);
   },
-  getBalance: function (tz1) {
-    return node.query("/chains/main/blocks/head/context/contracts/" + tz1 + "/balance").then(function (r) {
+  getBalance: function (a) {
+    return node.query("/chains/main/blocks/head/context/contracts/" + a + "/balance").then(function (r) {
       return r;
     });
   },
-  getDelegate: function (tz1) {
-    return node.query("/chains/main/blocks/head/context/contracts/" + tz1 + "/delegate").then(function(r){
+  getDelegate: function (a) {
+    return node.query("/chains/main/blocks/head/context/contracts/" + a + "/delegate").then(function(r){
       if (r) return r;
       return false;
     }).catch(function(){return false});
   },
-  getHead: function () {
+  getManager : function(a){
+		 return node.query("/chains/main/blocks/head/context/contracts/" + a + "/manager_key");
+	},
+	getCounter : function(a){
+		 return node.query("/chains/main/blocks/head/context/contracts/" + a + "/counter");
+	},
+	getBaker : function(tz1){
+		 return node.query("/chains/main/blocks/head/context/delegates/" + tz1);
+	},
+	getHead: function () {
     return node.query("/chains/main/blocks/head");
+  },
+	getHeader: function () {
+    return node.query("/chains/main/blocks/head/header");
   },
   getHeadHash: function () {
     return node.query("/chains/main/blocks/head/hash");
   },
 	
-	sendOperation: function (from, operation, keys, skipPrevalidation) {
-    if (typeof keys == 'undefined') keys = false;
-    if (typeof skipPrevalidation == 'undefined') skipPrevalidation = false;
+	getBallotList: function(){
+		return node.query("/chains/main/blocks/head/votes/ballot_list");
+	},
+	getProposals: function(){
+		return node.query("/chains/main/blocks/head/votes/proposals ");
+	},
+	getBallots: function(){
+		return node.query("/chains/main/blocks/head/votes/ballots ");
+	},
+	getListings: function(){
+		return node.query("/chains/main/blocks/head/votes/listings ");
+	},
+	getCurrentProposal: function(){
+		return node.query("/chains/main/blocks/head/votes/current_proposal ");
+	},
+	getCurrentPeriod: function(){
+		return node.query("/chains/main/blocks/head/votes/current_period_kind ");
+	},
+	getCurrentQuorum: function(){
+		return node.query("/chains/main/blocks/head/votes/current_quorum ");
+	},
+	
+	awaitOperation : function(hash, interval, timeout){
+		if (typeof interval == 'undefined') '30';
+		if (typeof timeout == 'undefined') '180';
+		if (timeout <= 0) throw "Timeout must be more than 0";
+		if (interval <= 0) throw "Interval must be more than 0";
+		var at = Math.ceil(timeout/interval) + 1, c = 0;;
+		return new Promise(function(resolve, reject){
+			var repeater = function(){
+				rpc.getHead().then(function(h){
+					c++;
+					outer:
+					for(var i = 3, found = false; i >= 0; i--){
+						for(var j = 0; j < h.operations[i].length; j++){
+							if (h.operations[i][j].hash == hash){
+								found = true;
+								break outer;
+							}
+						}
+					}
+					if (found) resolve(h.hash)
+					else {
+						if (c >= at) {
+							reject("Timeout");
+						} else {
+							setTimeout(repeater, interval);
+						}
+					}
+				});
+			}
+			repeater();
+		});
+	},
+	prepareOperation : function(from, operation, keys, revealFee){
+		if (typeof keys == 'undefined') keys = false;
+		if (typeof revealFee == 'undefined') revealFee = "1269";
     var hash, counter, pred_block, sopbytes, returnedContracts, opOb;
     var promises = [], requiresReveal=false;
-
     promises.push(node.query('/chains/main/blocks/head/header'));
-
     if (Array.isArray(operation)) {
       ops = operation;
     } else {
       ops = [operation];
     }
-   
     for(let i = 0; i < ops.length; i++){
       if (['transaction','origination','delegation'].indexOf(ops[i].kind) >= 0){
         requiresReveal = true;
-        promises.push(node.query('/chains/main/blocks/head/context/contracts/' + from + '/counter'));
-        promises.push(node.query('/chains/main/blocks/head/context/contracts/' + from + '/manager_key'));
+        promises.push(rpc.getCounter(from));
+        promises.push(rpc.getManager(from));
         break;
       }
     }
-
     return Promise.all(promises).then(function (f) {
       head = f[0];
       if (requiresReveal && keys && typeof f[2].key == 'undefined'){
         ops.unshift({
           kind : "reveal",
-          fee : (node.isZeronet ? "100000" : "1150"),
+          fee : revealFee,
           public_key : keys.pk,
           source : from,
 					gas_limit: 10000,
@@ -520,30 +572,32 @@ rpc = {
         "branch": head.hash,
         "contents": ops
       }
-      return node.query('/chains/'+head.chain_id+'/blocks/'+head.hash+'/helpers/forge/operations', opOb);
+      return tezos.forge(head, opOb);
     })
-    .then(function (f) {
-      var opbytes = f;
+	},
+	simulateOperation : function(from, operation, keys){
+		return rpc.prepareOperation(from, operation, keys).then(function(fullOp){
+			return node.query('/chains/main/blocks/head/helpers/scripts/run_operation', fullOp.opOb) 
+		});
+	},
+	sendOperation: function (from, operation, keys, skipPrevalidation, revealFee) {
+    if (typeof revealFee == 'undefined') revealFee = '1269';
+    if (typeof skipPrevalidation == 'undefined') skipPrevalidation = false;
+    return rpc.prepareOperation(from, operation, keys, revealFee).then(function (fullOp) {
       if (keys.sk === false) {
-				opOb.protocol = head.protocol;
-        return {
-          opOb : opOb,
-          opbytes : opbytes
-        };
+        return fullOp;
       } else {
         if (!keys) {
-          sopbytes = opbytes + "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
-          opOb.signature = "edsigtXomBKi5CTRf5cjATJWSyaRvhfYNHqSUGrn4SdbYRcGwQrUGjzEfQDTuqHhuA8b2d8NarZjz8TRf65WkpQmo423BtomS8Q";
+          fullOp.opbytes += "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+          fullOp.opOb.signature = "edsigtXomBKi5CTRf5cjATJWSyaRvhfYNHqSUGrn4SdbYRcGwQrUGjzEfQDTuqHhuA8b2d8NarZjz8TRf65WkpQmo423BtomS8Q";
         } else {
-          var signed = crypto.sign(opbytes, keys.sk, watermark.generic);
-          sopbytes = signed.sbytes;
-          opOb.signature = signed.edsig;
+          var signed = crypto.sign(fullOp.opbytes, keys.sk, watermark.generic);
+          fullOp.opbytes = signed.sbytes;
+          fullOp.opOb.signature = signed.edsig;
         }
-				//return node.query('/chains/main/blocks/head/helpers/scripts/run_operation', opOb)
-				
-				opOb.protocol = head.protocol;
-				if (skipPrevalidation) return rpc.silentInject(sopbytes);
-				else return rpc.inject(opOb, sopbytes);
+				console.log(fullOp);
+				if (skipPrevalidation) return rpc.silentInject(fullOp.opbytes);
+				else return rpc.inject(fullOp.opOb, fullOp.opbytes);
       }
     })
   },
@@ -577,7 +631,7 @@ rpc = {
   
 	account: function (keys, amount, spendable, delegatable, delegate, fee, gasLimit, storageLimit) {
 		if (typeof gasLimit == 'undefined') gasLimit = '10000';
-		if (typeof storageLimit == 'undefined') storageLimit = '300';
+		if (typeof storageLimit == 'undefined') storageLimit = '257';
     const operation = {
       "kind": "origination",
       "balance": utility.mutez(amount).toString(),
@@ -585,16 +639,16 @@ rpc = {
       "gas_limit": gasLimit,
       "storage_limit": storageLimit,
     };
-		if (node.isZeronet) operation['manager_pubkey'] = keys.pkh;
-		else operation['managerPubkey'] = keys.pkh;
+		operation['manager_pubkey'] = keys.pkh;
     if (typeof spendable != "undefined") operation.spendable = spendable;
     if (typeof delegatable != "undefined") operation.delegatable = delegatable;
     if (typeof delegate != "undefined" && delegate) operation.delegate = delegate;
     return rpc.sendOperation(keys.pkh, operation, keys);
   },
-	transfer: function (from, keys, to, amount, fee, parameter, gasLimit, storageLimit) {
-    if (typeof gasLimit == 'undefined') gasLimit = '10300';
-    if (typeof storageLimit == 'undefined') storageLimit = '277';
+	transfer: function (from, keys, to, amount, fee, parameter, gasLimit, storageLimit, revealFee) {
+    if (typeof revealFee == 'undefined') revealFee = '1269';
+    if (typeof gasLimit == 'undefined') gasLimit = '10200';
+    if (typeof storageLimit == 'undefined') storageLimit = '300';
     var operation = {
       "kind": "transaction",
       "fee" : fee.toString(),
@@ -607,11 +661,11 @@ rpc = {
     if (parameter){
       operation.parameters = eztz.utility.sexp2mic(parameter);
     }
-    return rpc.sendOperation(from, operation, keys);
+    return rpc.sendOperation(from, operation, keys, false, revealFee);
   },
   originate: function (keys, amount, code, init, spendable, delegatable, delegate, fee, gasLimit, storageLimit) {
     if (typeof gasLimit == 'undefined') gasLimit = '10000';
-    if (typeof storageLimit == 'undefined') storageLimit = '300';
+    if (typeof storageLimit == 'undefined') storageLimit = '257';
     var _code = utility.ml2mic(code), script = {
       code: _code,
       storage: utility.sexp2mic(init)
@@ -623,8 +677,7 @@ rpc = {
       "fee" : fee.toString(),
       "script": script,
     };
-		if (node.isZeronet) operation['manager_pubkey'] = keys.pkh;
-		else operation['managerPubkey'] = keys.pkh;
+		operation['manager_pubkey'] = keys.pkh;
     if (typeof spendable != "undefined") operation.spendable = spendable;
     if (typeof delegatable != "undefined") operation.delegatable = delegatable;
     if (typeof delegate != "undefined" && delegate) operation.delegate = delegate;
@@ -638,8 +691,10 @@ rpc = {
       "fee" : fee.toString(),
       "gas_limit": gasLimit,
       "storage_limit": storageLimit,
-      "delegate": (typeof delegate != "undefined" ? delegate : keys.pkh),
     };
+    if (typeof delegate != "undefined" && delegate) {
+      operation.delegate = delegate;
+    }
     return rpc.sendOperation(from, operation, keys);
   },
   registerDelegate(keys, fee, gasLimit, storageLimit) {
@@ -748,6 +803,211 @@ contract = {
     return setInterval(ct, timeout * 1000);
   },
 };
+tezos = {
+  forge : function(head, opOb, validateLocalForge){
+    if (typeof validateLocalForge == 'undefined') validateLocalForge = true;
+		
+		
+    return node.query('/chains/'+head.chain_id+'/blocks/'+head.hash+'/helpers/forge/operations', opOb).then(function(remoteForgedBytes){
+      var localForgedBytes;
+      localForgedBytes = utility.buf2hex(utility.b58cdecode(opOb.branch, prefix.b));
+      for(var i = 0; i < opOb.contents.length; i++){
+        localForgedBytes += forgeOp(opOb.contents[i]);
+      }
+      
+      opOb.protocol = head.protocol;
+      if (localForgedBytes == remoteForgedBytes) return {
+				opbytes : localForgedBytes,
+				opOb : opOb
+			};
+      else throw "Forge validatione error - local and remote bytes don't match";
+    });
+  },
+  encodeRawBytes : function (input){
+      const rec = function(input){
+        const result = [];
+
+        if (input instanceof Array) {
+          result.push('02')
+          const bytes = input.map(function(x){ return rec(x)}).join('');
+          const len = bytes.length / 2;
+          result.push(len.toString(16).padStart(8, '0'));
+          result.push(bytes);
+
+        } else if (input instanceof Object) {
+          if (input.prim) {
+            const args_len = input.args ? input.args.length : 0
+            result.push(prim_mapping_reverse[args_len][!!input.annots])
+            result.push(op_mapping_reverse[input.prim])
+            if (input.args) {
+              input.args.forEach(function(arg){
+                return result.push(rec(arg));
+              });
+            }
+
+            if (input.annots) {
+              const annots_bytes = input.annots.map(function(x){
+                return utility.buf2hex(new TextEncoder().encode(x))
+              }).join('20');
+              result.push((annots_bytes.length / 2).toString(16).padStart(8, '0'));
+              result.push(annots_bytes);
+            }
+
+          } else if (input.bytes) {
+
+            const len = input.bytes.length / 2;
+            result.push('0A');
+            result.push(len.toString(16).padStart(8, '0'));
+            result.push(input.bytes);
+
+          } else if (input.int) {
+            const num = new BN(input.int, 10);
+            const positive_mark = num.toString(2)[0] === '-' ? '1' : '0';
+            const binary = num.toString(2).replace('-', '');
+            const pad = binary.length <= 6 ? 6 : ((binary.length - 6) % 7 ? binary.length + 7 - (binary.length - 6) % 7 : binary.length);
+            
+            const splitted = binary.padStart(pad, '0').match(/\d{6,7}/g);
+            const reversed = splitted.reverse();
+
+            reversed[0] = positive_mark + reversed[0];
+            const num_hex = reversed.map(function(x, i){ 
+              return parseInt((i === reversed.length - 1 ? '0' : '1') + x, 2)
+              .toString(16)
+              .padStart(2, '0')
+            }).join('')
+
+            result.push('00')
+            result.push(num_hex)
+
+          } else if (input.string) {
+
+            const string_bytes = new TextEncoder().encode(input.string)
+            const string_hex = [].slice.call(string_bytes).map(function(x){
+              return x.toString(16).padStart(2, '0')
+            }).join('');
+            const len = string_bytes.length;
+            result.push('01');
+            result.push(len.toString(16).padStart(8, '0'));
+            result.push(string_hex);
+          }
+        }
+        return result.join('')
+      }
+
+      return rec(input).toUpperCase()
+  },
+  decodeRawBytes : function (bytes) {
+    bytes = bytes.toUpperCase()
+    
+    let index = 0
+
+    const read = function(len) { return bytes.slice(index, index + len) };
+
+    const rec = function(){
+      const b = read(2)
+      const prim = prim_mapping[b]
+      
+      if (prim instanceof Object) {
+
+        index += 2
+        const op = op_mapping[read(2)]
+        index += 2
+
+        const args = Array.apply(null, new Array(prim.len))
+        const result = {prim: op, args: args.map(function(){ return rec()}), annots: undefined}
+
+        if (!prim.len)
+          delete result.args
+
+        if (prim.annots) {
+          const annots_len = parseInt(read(8), 16) * 2
+          index += 8
+
+          const string_hex_lst = read(annots_len).match(/[\dA-F]{2}/g)
+          index += annots_len
+          
+          if (string_hex_lst) {
+            const string_bytes = new Uint8Array(string_hex_lst.map(function(x) { return parseInt(x, 16)}))
+            const string_result = new TextDecoder('utf-8').decode(string_bytes)
+            result.annots = string_result.split(' ')
+          }
+        } else {
+          delete result.annots
+        }
+
+        return result
+
+      } else {
+        if (b === '0A') {
+
+          index += 2
+          const len = read(8)
+          index += 8
+          const int_len = parseInt(len, 16) * 2
+          const data = read(int_len)
+          index += int_len
+          return {bytes: data}
+
+        } else if (b === '01') {
+          index += 2
+          const len = read(8)
+          index += 8
+          const int_len = parseInt(len, 16) * 2
+          const data = read(int_len)
+          index += int_len
+
+          const match_result = data.match(/[\dA-F]{2}/g)
+          if (match_result instanceof Array) {
+            const string_raw = new Uint8Array(match_result.map(function(x){ return parseInt(x, 16)}))
+            return {string: new TextDecoder('utf-8').decode(string_raw)}
+          } else {
+            throw 'Input bytes error'
+          }
+
+        } else if (b === '00') {
+          index += 2
+
+          const first_bytes = parseInt(read(2), 16).toString(2).padStart(8, '0')
+          index += 2
+          const is_positive = first_bytes[1] === '0'
+
+          const valid_bytes = [first_bytes.slice(2)]
+
+          let checknext = first_bytes[0] === '1'
+          while (checknext) {
+            const bytes = parseInt(read(2), 16).toString(2).padStart(8, '0')
+            index += 2
+
+            valid_bytes.push(bytes.slice(1))
+            checknext = bytes[0] === '1'
+          }
+
+          const num = new BN(valid_bytes.reverse().join(''), 2)
+          return {int: num.toString()}
+        } else if (b === '02') {
+          index += 2
+
+          const len = read(8)
+          index += 8
+          const int_len = parseInt(len, 16) * 2
+          const data = read(int_len)
+          const limit = index + int_len
+
+          const seq_lst = []
+          while (limit > index) {
+            seq_lst.push(rec())
+          }
+          return seq_lst
+        }
+
+      }
+
+      throw `Invalid raw bytes: Byte:${b} Index:${index}`
+    }
+
+    return rec()
+  }
+},
 trezor = {
 	source : function(address){
 		var tag = (address[0] == "t" ? 0 : 1);
@@ -763,6 +1023,19 @@ trezor = {
 			tag : tag,
 			hash : bytes
 		};
+	},
+  parameter : function(address, opbytes){
+		var tag = (address[0] == "t" ? 0 : 1);
+		var curve = (parseInt(address[2])-1);
+		var pp = (tag == 1 ? prefix.KT : prefix["tz"+(curve+1)]);
+		var bytes = utility.b58cdecode(address, pp);
+		if (tag == 1) {
+			bytes = utility.mergebuf(bytes, [0])
+		} else {					
+			bytes = utility.mergebuf([curve], bytes)
+		}
+    hex = utility.buf2hex(utility.mergebuf([tag], bytes));
+    return (opbytes.substr(-46) == hex + "00" ? false : utility.hex2buf(opbytes.substr(opbytes.indexOf(hex)+hex.length+2)));
 	},
 	operation : function(d){
 		var operations = [];
@@ -794,11 +1067,10 @@ trezor = {
 					case "transaction":
 						op2.amount = parseInt(op.amount);
 						op2.destination = trezor.source(op.destination);
-						if (d.opbytes.length > 172) op2.parameters = utility.hex2buf(d.opbytes.substr(172));
+            if (p = trezor.parameter(op.destination, d.opbytes)) op2.parameters = p;
 					break;
 					case "origination":
-						if (node.isZeronet) op2.manager_pubkey = trezor.source(op.manager_pubkey).hash;
-						else op2.managerPubkey = trezor.source(op.managerPubkey).hash;
+						op2.manager_pubkey = trezor.source(op.manager_pubkey).hash;
 						op2.balance = parseInt(op.balance);
 						op2.spendable = op.spendable;
 						op2.delegatable = op.delegatable;
@@ -823,13 +1095,333 @@ trezor = {
 	}
 };
 
+
+//Forge functions
+var op_mapping = {
+  '00':'parameter',
+  '01':'storage',
+  '02':'code',
+  '03':'False',
+  '04':'Elt',
+  '05':'Left',
+  '06':'None',
+  '07':'Pair',
+  '08':'Right',
+  '09':'Some',
+  '0A':'True',
+  '0B':'Unit',
+  '0C':'PACK',
+  '0D':'UNPACK',
+  '0E':'BLAKE2B',
+  '0F':'SHA256',
+  '10':'SHA512',
+  '11':'ABS',
+  '12':'ADD',
+  '13':'AMOUNT',
+  '14':'AND',
+  '15':'BALANCE',
+  '16':'CAR',
+  '17':'CDR',
+  '18':'CHECK_SIGNATURE',
+  '19':'COMPARE',
+  '1A':'CONCAT',
+  '1B':'CONS',
+  '1C':'CREATE_ACCOUNT',
+  '1D':'CREATE_CONTRACT',
+  '1E':'IMPLICIT_ACCOUNT',
+  '1F':'DIP',
+  '20':'DROP',
+  '21':'DUP',
+  '22':'EDIV',
+  '23':'EMPTY_MAP',
+  '24':'EMPTY_SET',
+  '25':'EQ',
+  '26':'EXEC',
+  '27':'FAILWITH',
+  '28':'GE',
+  '29':'GET',
+  '2A':'GT',
+  '2B':'HASH_KEY',
+  '2C':'IF',
+  '2D':'IF_CONS',
+  '2E':'IF_LEFT',
+  '2F':'IF_NONE',
+  '30':'INT',
+  '31':'LAMBDA',
+  '32':'LE',
+  '33':'LEFT',
+  '34':'LOOP',
+  '35':'LSL',
+  '36':'LSR',
+  '37':'LT',
+  '38':'MAP',
+  '39':'MEM',
+  '3A':'MUL',
+  '3B':'NEG',
+  '3C':'NEQ',
+  '3D':'NIL',
+  '3E':'NONE',
+  '3F':'NOT',
+  '40':'NOW',
+  '41':'OR',
+  '42':'PAIR',
+  '43':'PUSH',
+  '44':'RIGHT',
+  '45':'SIZE',
+  '46':'SOME',
+  '47':'SOURCE',
+  '48':'SENDER',
+  '49':'SELF',
+  '4A':'STEPS_TO_QUOTA',
+  '4B':'SUB',
+  '4C':'SWAP',
+  '4D':'TRANSFER_TOKENS',
+  '4E':'SET_DELEGATE',
+  '4F':'UNIT',
+  '50':'UPDATE',
+  '51':'XOR',
+  '52':'ITER',
+  '53':'LOOP_LEFT',
+  '54':'ADDRESS',
+  '55':'CONTRACT',
+  '56':'ISNAT',
+  '57':'CAST',
+  '58':'RENAME',
+  '59':'bool',
+  '5A':'contract',
+  '5B':'int',
+  '5C':'key',
+  '5D':'key_hash',
+  '5E':'lambda',
+  '5F':'list',
+  '60':'map',
+  '61':'big_map',
+  '62':'nat',
+  '63':'option',
+  '64':'or',
+  '65':'pair',
+  '66':'set',
+  '67':'signature',
+  '68':'string',
+  '69':'bytes',
+  '6A':'mutez',
+  '6B':'timestamp',
+  '6C':'unit',
+  '6D':'operation',
+  '6E':'address',
+  '6F':'SLICE',
+}
+var op_mapping_reverse = (function(){
+  var result = {}
+  for (const key in op_mapping) {
+    result[op_mapping[key]] = key
+  }
+  return result
+})()
+
+var prim_mapping = {
+  '00': 'int',    
+  '01': 'string',             
+  '02': 'seq',             
+  '03': {name: 'prim', len: 0, annots: false},          
+  '04': {name: 'prim', len: 0, annots: true},
+  '05': {name: 'prim', len: 1, annots: false},           
+  '06': {name: 'prim', len: 1, annots: true},   
+  '07': {name: 'prim', len: 2, annots: false},          
+  '08': {name: 'prim', len: 2, annots: true},  
+  '09': {name: 'prim', len: 3, annots: true},
+  '0A': 'bytes'                  
+}
+var prim_mapping_reverse = {
+  [0]: {
+    false: '03',
+    true: '04'
+  },
+  [1]: {
+    false: '05',
+    true: '06'
+  },
+  [2]: {
+    false: '07',
+    true: '08'
+  },
+  [3]: {
+    true: '09'
+  }
+}
+var forgeOpTags = {
+  "endorsement" : 0,
+  "seed_nonce_revelation" : 1,
+  "double_endorsement_evidence" : 2,
+  "double_baking_evidence" : 3,
+  "activate_account" : 4,
+  "proposals" : 5,
+  "ballot" : 6,
+  "reveal" : 7,
+  "transaction" : 8,
+  "origination" : 9,
+  "delegation" : 10,
+};
+function forgeOp(op){
+  var fop;
+  fop = eztz.utility.buf2hex(new Uint8Array([forgeOpTags[op.kind]]));
+  switch (forgeOpTags[op.kind]) {
+    case 0: 
+    case 1: 
+      fop += eztz.utility.buf2hex(toBytesInt32(op.level));
+      if (forgeOpTags[op.kind] == 0) break;
+      fop += op.nonce;
+      if (forgeOpTags[op.kind] == 1) break;
+    case 2:
+    case 3:
+      throw "Double bake and double endorse forging is not complete";
+      if (forgeOpTags[op.kind] == 2) break;
+      if (forgeOpTags[op.kind] == 3) break;
+    case 4:
+      fop += eztz.utility.buf2hex(eztz.utility.b58cdecode(op.pkh, eztz.prefix.tz1));
+      fop += op.secret;
+      if (forgeOpTags[op.kind] == 4) break;
+    case 5: 
+    case 6: 
+      fop += forgePublicKeyHash(op.source);
+      fop += eztz.utility.buf2hex(toBytesInt32(op.period));
+      if (forgeOpTags[op.kind] == 5) {
+        throw "Proposal forging is not complete";
+        break;
+      } else if (forgeOpTags[op.kind] == 6) {
+        fop += eztz.utility.buf2hex(eztz.utility.b58cdecode(op.proposal, eztz.prefix.P));
+        fop += (op.ballot == "yay" ? "00" : (op.ballot == "nay" ? "01" : "02"));
+        break;
+      }
+    case 7: 
+    case 8: 
+    case 9: 
+    case 10: 
+      fop += forgeAddress(op.source);
+      fop += forgeZarith(op.fee);
+      fop += forgeZarith(op.counter);
+      fop += forgeZarith(op.gas_limit);
+      fop += forgeZarith(op.storage_limit);
+      if (forgeOpTags[op.kind] == 7) {
+        fop += forgePublicKey(op.public_key);
+      } else if (forgeOpTags[op.kind] == 8) {
+        fop += forgeZarith(op.amount);
+        fop += forgeAddress(op.destination);
+        if (typeof op.parameters != 'undefined' && op.parameters) {
+          fop += forgeBool(true);
+          fop += forgeParameters(op.parameters);
+        } else {
+          fop += forgeBool(false);
+        }
+      } else if (forgeOpTags[op.kind] == 9) {
+        fop += forgePublicKeyHash(op.manager_pubkey);
+        fop += forgeZarith(op.balance);
+        fop += forgeBool(op.spendable);
+        fop += forgeBool(op.delegatable);
+        if (typeof op.delegate != 'undefined' && op.delegate){
+          fop += forgeBool(true);
+          fop += forgePublicKeyHash(op.delegate);
+        } else {
+          fop += forgeBool(false);
+        }
+        if (typeof op.script != 'undefined' && op.script){
+          fop += forgeBool(true);
+          fop += forgeScript(op.script);
+        } else {
+          fop += forgeBool(false);
+        }
+      } else if (forgeOpTags[op.kind] == 10) {
+        if (typeof op.delegate != 'undefined' && op.delegate){
+          fop += forgeBool(true);
+          fop += forgePublicKeyHash(op.delegate);
+        } else {
+          fop += forgeBool(false);
+        }
+      }
+    break;
+  }
+  return fop;
+}
+function forgeBool(b){
+  return (b ? "ff" : "00");
+}
+function forgeScript(s){
+  var t1 = tezos.encodeRawBytes(s.code).toLowerCase();
+  var t2 = tezos.encodeRawBytes(s.storage).toLowerCase();
+  return toBytesInt32Hex(t1.length/2) + t1 + toBytesInt32Hex(t2.length/2) + t2;
+}
+function forgeParameters(p){
+  var t = tezos.encodeRawBytes(p).toLowerCase();
+  return toBytesInt32Hex(t.length/2) + t;
+}
+function forgeAddress(a){
+  var fa;
+  if (a.substr(0, 1) == "K"){
+    fa = "01";
+    fa += eztz.utility.buf2hex(eztz.utility.b58cdecode(a, eztz.prefix.KT));
+    fa += "00";
+  } else {
+    fa = "00";
+    fa += forgePublicKeyHash(a);
+  }
+  return fa;
+}
+function forgeZarith(n){
+  var fn = '';
+  n = parseInt(n);
+  while(true){
+    if (n < 128){
+      if (n < 16) fn += "0";
+      fn += n.toString(16);
+      break;
+    } else {
+      var b = (n % 128);
+      n -= b;
+      n /= 128;
+      b += 128;
+      fn += b.toString(16);
+    }
+  }
+  return fn;
+}
+function forgePublicKeyHash(pkh){
+  var fpkh;
+  var t = parseInt(pkh.substr(2, 1));
+  fpkh = "0" + (t - 1).toString();
+  fpkh += eztz.utility.buf2hex(eztz.utility.b58cdecode(pkh, eztz.prefix[pkh.substr(0,3)]));
+  return fpkh;
+}
+function forgePublicKey(pk){
+  var fpk;
+  var t;
+  switch(pk.substr(0,2)){
+    case "ed": fpk = "00"; break;
+    case "sp": fpk = "01"; break;
+    case "p2": fpk = "02"; break;
+  }
+  fpk += eztz.utility.buf2hex(eztz.utility.b58cdecode(pk, eztz.prefix[pk.substr(0,4)]));
+  return fpk;
+}
+function toBytesInt32 (num) {
+  num = parseInt(num);
+  arr = new Uint8Array([
+   (num & 0xff000000) >> 24,
+   (num & 0x00ff0000) >> 16,
+   (num & 0x0000ff00) >> 8,
+   (num & 0x000000ff)
+  ]);
+  return arr.buffer;
+}
+function toBytesInt32Hex (num) {
+  return utility.buf2hex(toBytesInt32(num));
+}
+
 //Legacy
 utility.ml2tzjson = utility.sexp2mic;
 utility.tzjson2arr = utility.mic2arr;
 utility.mlraw2json = utility.ml2mic;
 utility.mintotz = utility.totez;
 utility.tztomin = utility.mutez;
-prefix.TZ = new Uint8Array([2,90,121]);
 
 //Expose library
 eztz = {
@@ -842,6 +1434,7 @@ eztz = {
   rpc: rpc,
   contract: contract,
   trezor: trezor,
+  tezos : tezos
 };
 
 module.exports = {
